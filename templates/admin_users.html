@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+{% block title %}Users and sessions{% endblock %}
+{% block content %}
+<div class="pagehead"><div><p class="eyebrow">BUSINESS ADMINISTRATION</p><h1>Users and sessions</h1><p class="muted">Manage employee accounts and review sign-in history for this business only.</p></div></div>
+<section class="panel">
+    <h2>Create employee account</h2>
+    <form method="post" class="formgrid">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="create">
+        <div><label for="new-username">Username</label><input id="new-username" name="username" maxlength="80" required></div>
+        <div><label for="new-email">Email</label><input id="new-email" name="email" type="email" maxlength="254" required></div>
+        <div><label for="new-role">Role</label><select id="new-role" name="role"><option value="manager">Manager</option><option value="cashier">Cashier</option><option value="stock_clerk">Stock clerk</option><option value="administrator">Administrator</option></select></div>
+        <div><label for="temporary-password">Temporary password (12+ characters)</label><input id="temporary-password" name="password" type="password" minlength="12" maxlength="256" required autocomplete="new-password"></div>
+        <div class="span2"><button class="btn primary">Create account</button><small class="muted">Give this password to the employee securely; they must change it after signing in.</small></div>
+    </form>
+</section>
+<section class="panel">
+    <h2>Employee accounts</h2>
+    <div class="tablewrap"><table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Last sign-in</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+    {% for user in users %}
+    <tr>
+        <td><b>{{ user.username }}</b>{% if user.id == current_user.id %} (you){% endif %}</td>
+        <td><input form="user-form-{{ user.id }}" name="email" type="email" value="{{ user.email or '' }}" maxlength="254" required aria-label="Email for {{ user.username }}"></td>
+        <td><select form="user-form-{{ user.id }}" name="role" aria-label="Role for {{ user.username }}">
+            {% for role in ('administrator', 'manager', 'cashier', 'stock_clerk') %}<option value="{{ role }}" {% if user.role == role %}selected{% endif %}>{{ role|replace('_', ' ')|title }}</option>{% endfor %}
+        </select></td>
+        <td>{{ user.last_login_at.strftime('%d %b %Y %H:%M') if user.last_login_at else 'Never' }}</td>
+        <td>{% if user.is_active %}<span class="pill good">Active</span>{% else %}<span class="pill low">Disabled</span>{% endif %}{% if user.must_change_password %}<br><small>Change required</small>{% endif %}</td>
+        <td>
+            <form method="post" id="user-form-{{ user.id }}" class="inlineform">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="update"><input type="hidden" name="user_id" value="{{ user.id }}">
+            </form>
+            <button form="user-form-{{ user.id }}" class="btn secondary smallbtn">Save</button>
+            <form method="post" class="inlineform">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="user_id" value="{{ user.id }}">
+                {% if user.is_active %}<input type="hidden" name="action" value="disable"><button class="btn secondary smallbtn" {% if user.id == current_user.id %}disabled{% endif %}>Disable</button>{% else %}<input type="hidden" name="action" value="activate"><button class="btn secondary smallbtn">Reactivate</button>{% endif %}
+            </form>
+        </td>
+    </tr>
+    {% else %}<tr><td colspan="6">No accounts found.</td></tr>{% endfor %}
+    </tbody></table></div>
+</section>
+<section class="panel">
+    <h2>Active sessions</h2>
+    <div class="tablewrap"><table><thead><tr><th>User</th><th>Started</th><th>Last activity</th><th>Expires</th><th></th></tr></thead><tbody>
+    {% for item in active_sessions %}
+    <tr><td>{{ item.user.username }}</td><td>{{ item.created_at.strftime('%d %b %Y %H:%M') }}</td><td>{{ item.last_seen_at.strftime('%d %b %Y %H:%M') }}</td><td>{{ item.expires_at.strftime('%d %b %Y %H:%M') }}</td><td><form method="post" action="{{ url_for('revoke_user_session', session_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn secondary smallbtn">Revoke</button></form></td></tr>
+    {% else %}<tr><td colspan="5">No active sessions.</td></tr>{% endfor %}
+    </tbody></table></div>
+</section>
+<section class="panel">
+    <h2>Recent sign-in and session history</h2>
+    <div class="tablewrap"><table><thead><tr><th>Time</th><th>Username</th><th>Event</th></tr></thead><tbody>
+    {% for event in login_events %}<tr><td>{{ event.created_at.strftime('%d %b %Y %H:%M') }}</td><td>{{ event.username }}</td><td>{{ event.event_type|replace('_', ' ')|title }}</td>{% else %}<tr><td colspan="3">No sign-in history.</td></tr>{% endfor %}
+    </tbody></table></div>
+</section>
+{% endblock %}

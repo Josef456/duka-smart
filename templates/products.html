@@ -1,0 +1,55 @@
+{% extends 'base.html' %}
+{% block title %}Inventory{% endblock %}
+{% block content %}
+<div class="pagehead">
+    <div>
+        <p class="eyebrow">PRODUCTS & STOCK</p>
+        <h1>Inventory</h1>
+        <p class="muted">Keep product quantities and prices up to date.</p>
+    </div>
+</div>
+<div class="grid twocol">
+    <section class="panel">
+        <h2>Add a product</h2>
+        <form method="post" class="formgrid">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="span2"><label for="product-name">Product name</label><input id="product-name" name="name" required placeholder="e.g. Cooking oil"></div>
+            <div><label for="product-sku">SKU / code</label><input id="product-sku" name="sku" required placeholder="LAG-001"></div>
+            <div><label for="product-quantity">Opening quantity</label><input id="product-quantity" name="quantity" type="number" min="0" max="2147483647" value="0" required></div>
+            <div><label for="product-cost">Cost price per item (UGX)</label><input id="product-cost" name="cost_price" type="number" min="0" step="1" required></div>
+            <div><label for="product-price">Selling price per item (UGX)</label><input id="product-price" name="selling_price" type="number" min="0" step="1" required></div>
+            <div><label for="product-reorder">Low-stock alert</label><input id="product-reorder" name="low_stock_at" type="number" min="0" max="2147483647" value="5" required></div>
+            <div class="span2"><button class="btn primary full">Save product</button></div>
+        </form>
+    </section>
+    <section class="panel">
+        <h2>Stock guidance</h2>
+        <div class="tip"><b>Track stock</b><p>Opening quantity, sales and low-stock alerts are managed per product.</p></div>
+        <div class="tip"><b>Set accurate prices</b><p>Enter purchase cost and selling price for one stock item.</p></div>
+    </section>
+</div>
+<section class="panel">
+    <div class="panelhead"><h2>All products <span class="count">{{ products|length }}</span></h2></div>
+    {% if products %}
+    <div class="tablewrap">
+        <table>
+            <thead><tr><th>Product</th><th>Code</th><th>Stock</th><th>Cost</th><th>Selling price</th><th>Status</th></tr></thead>
+            <tbody>
+                {% for p in products %}
+                <tr>
+                    <td><b>{{ p.name }}</b></td>
+                    <td>{{ p.sku }}</td>
+                    <td>{{ p.quantity }}</td>
+                    <td>{{ ugx(p.cost_price) }}</td>
+                    <td>{{ ugx(p.selling_price) }}</td>
+                    <td>{% if p.quantity <= p.low_stock_at %}<span class="pill low">Low stock</span>{% else %}<span class="pill good">In stock</span>{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty">No products yet. Add your first product above.</div>
+    {% endif %}
+</section>
+{% endblock %}

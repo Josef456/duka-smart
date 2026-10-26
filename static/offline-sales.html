@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="theme-color" content="#087f72">
+    <link rel="manifest" href="/static/manifest.webmanifest">
+    <link rel="stylesheet" href="/static/style.css">
+    <title>Offline sales · DukaSmart Uganda</title>
+</head>
+<body>
+    <header class="topbar">
+        <a class="brand" href="/"><span class="brandmark">D</span><span>DukaSmart<small>UGANDA</small></span></a>
+        <span class="topright">Offline sales</span>
+    </header>
+    <main class="main">
+        <div class="pagehead">
+            <div><p class="eyebrow">POINT OF SALE</p><h1>Record a sale offline</h1><p class="muted">This device will synchronize saved sales when it reconnects.</p></div>
+        </div>
+        <div class="notice" id="sync-status" role="status" aria-live="polite">Loading the saved product catalogue…</div>
+        <section class="panel">
+            <h2>New sale</h2>
+            <form data-sale-form>
+                <label for="product">Product</label>
+                <select name="product_id" id="product" required><option value="">Choose product</option></select>
+                <label for="quantity">Quantity</label>
+                <input type="number" name="quantity" id="quantity" min="1" value="1" required>
+                <label for="payment-method">Payment method</label>
+                <select name="payment_method" id="payment-method"><option>Cash</option><option>Mobile Money</option><option>Bank</option><option value="Credit">Credit (record debt separately)</option></select>
+                <div class="totalbox"><span>Estimated total</span><strong id="total">UGX 0</strong></div>
+                <button class="btn primary full" type="submit">Save sale on this device</button>
+            </form>
+            <div id="sale-message" class="flashwrap" role="status" aria-live="polite"></div>
+        </section>
+        <section class="panel">
+            <h2>Pending synchronization</h2>
+            <div id="pending-sales" aria-live="polite"><p class="empty">Checking pending sales…</p></div>
+        </section>
+        <p class="muted tiny">Only use this page on the business device that was previously signed in and synchronized. Keep the device secure. Sales with stale stock or prices remain queued for review.</p>
+    </main>
+    <footer>DukaSmart Uganda · Offline sales · Keep regular backups</footer>
+    <script src="/static/app.js"></script>
+</body>
+</html>

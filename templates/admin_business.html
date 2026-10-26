@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block title %}Business settings{% endblock %}
+{% block content %}
+<div class="pagehead"><div><p class="eyebrow">BUSINESS ADMINISTRATION</p><h1>Business settings</h1><p class="muted">Settings apply only to {{ business.name }}.</p></div></div>
+<section class="panel">
+    <h2>Business profile</h2>
+    <form method="post" class="formgrid">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="span2"><label for="business-name">Business name</label><input id="business-name" name="name" maxlength="120" value="{{ business.name }}" required></div>
+        <div class="span2"><button class="btn primary">Save settings</button></div>
+    </form>
+</section>
+{% endblock %}

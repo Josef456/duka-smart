@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block title %}Activity audit{% endblock %}
+{% block content %}
+<div class="pagehead"><div><p class="eyebrow">BUSINESS ADMINISTRATION</p><h1>Activity audit</h1><p class="muted">Append-only records of important actions in this business.</p></div></div>
+<section class="panel"><div class="tablewrap"><table><thead><tr><th>Time</th><th>Employee</th><th>Action</th><th>Record</th><th>Summary</th></tr></thead><tbody>
+{% for event in events %}
+<tr><td>{{ event.created_at.strftime('%d %b %Y %H:%M') }}</td><td>{{ event.user.username if event.user else 'System' }}</td><td>{{ event.action|replace('_', ' ')|title }}</td><td>{{ event.entity_type }}{% if event.entity_id %} #{{ event.entity_id }}{% endif %}</td><td>{{ event.summary }}</td></tr>
+{% else %}<tr><td colspan="5">No activity has been recorded.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}

@@ -1,0 +1,8 @@
+{
+  "name": "DukaSmart Uganda",
+  "short_name": "DukaSmart",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f8f7",
+  "theme_color": "#087f72"
+}

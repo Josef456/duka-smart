@@ -1,0 +1,1 @@
+"""DukaSmart regression tests."""
