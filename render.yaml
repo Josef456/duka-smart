@@ -11,6 +11,20 @@ services:
         fromDatabase:
           name: dukasmart-db
           property: connectionString
+      - key: APP_BASE_URL
+        sync: false
+      - key: MAIL_SERVER
+        value: smtp.gmail.com
+      - key: MAIL_PORT
+        value: "587"
+      - key: MAIL_USE_TLS
+        value: "true"
+      - key: MAIL_USERNAME
+        sync: false
+      - key: MAIL_PASSWORD
+        sync: false
+      - key: MAIL_FROM
+        sync: false
 databases:
   - name: dukasmart-db
     databaseName: dukasmart
