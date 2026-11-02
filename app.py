@@ -12,8 +12,11 @@ from functools import wraps
 from flask import Flask, abort, current_app, g, render_template, request, redirect, url_for, flash, session, jsonify, send_from_directory
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from werkzeug.security import generate_password_hash, check_password_hash
+
+MIN_PASSWORD_LENGTH = 4
 
 app = Flask(__name__)
 production = (
@@ -111,6 +114,21 @@ class ActivityLog(db.Model):
     summary = db.Column(db.String(240), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
     user = db.relationship('User')
+
+class APIKey(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(80), nullable=False)
+    key_hash = db.Column(db.String(64), nullable=False, unique=True)
+    key_prefix = db.Column(db.String(24), nullable=False)
+    scopes = db.Column(db.String(160), nullable=False)
+    business_id = db.Column(db.Integer, db.ForeignKey('business.id'), nullable=False, index=True)
+    created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    last_used_at = db.Column(db.DateTime, nullable=True)
+    expires_at = db.Column(db.DateTime, nullable=True)
+    revoked_at = db.Column(db.DateTime, nullable=True)
+    rate_window_started_at = db.Column(db.DateTime, nullable=True)
+    rate_request_count = db.Column(db.Integer, nullable=False, default=0)
 
 class Product(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -252,6 +270,62 @@ def roles_required(*allowed_roles):
         return wrapped
     return decorator
 
+API_KEY_SCOPES = {
+    'products:read': 'Read product and stock information',
+    'sales:read': 'Read recorded sales',
+    'expenses:read': 'Read expense records',
+    'credit:read': 'Read customer credit balances',
+    'reports:read': 'Read business report summaries',
+}
+API_KEY_RATE_LIMIT = 120
+API_KEY_RATE_WINDOW = timedelta(minutes=1)
+
+def api_error(code, message, status):
+    response = jsonify({'error': {'code': code, 'message': message}})
+    if status == 401:
+        response.headers['WWW-Authenticate'] = 'Bearer'
+    return response, status
+
+def api_key_required(scope):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            scheme, separator, token = request.headers.get('Authorization', '').partition(' ')
+            if scheme.lower() != 'bearer' or not separator or not token:
+                return api_error('authentication_required', 'Provide an API key using Bearer authentication.', 401)
+
+            key = db.session.query(APIKey).filter_by(
+                key_hash=sha256(token.encode()).hexdigest(),
+            ).with_for_update().first()
+            now = datetime.utcnow()
+            if (not key or key.revoked_at is not None
+                    or (key.expires_at is not None and key.expires_at <= now)):
+                return api_error('invalid_api_key', 'The API key is invalid, expired, or revoked.', 401)
+            if scope not in key.scopes.split(','):
+                return api_error('insufficient_scope', f'This API key does not have the {scope} permission.', 403)
+
+            if (key.rate_window_started_at is None
+                    or key.rate_window_started_at <= now - API_KEY_RATE_WINDOW):
+                key.rate_window_started_at = now
+                key.rate_request_count = 0
+            if key.rate_request_count >= API_KEY_RATE_LIMIT:
+                retry_after = (
+                    key.rate_window_started_at + API_KEY_RATE_WINDOW - now
+                ).total_seconds()
+                db.session.commit()
+                response, status = api_error('rate_limit_exceeded', 'Too many API requests. Retry shortly.', 429)
+                response.headers['Retry-After'] = str(max(1, math.ceil(retry_after)))
+                return response, status
+
+            key.rate_request_count += 1
+            key.last_used_at = now
+            g.api_key = key
+            g.business_id = key.business_id
+            db.session.commit()
+            return fn(*args, **kwargs)
+        return wrapped
+    return decorator
+
 def role_home_endpoint(role):
     if role in ('administrator', 'manager'):
         return 'dashboard'
@@ -302,6 +376,7 @@ def globals_for_templates():
         'ugx': lambda value: f'UGX {value:,.0f}',
         'csrf_token': session.get('_csrf_token', ''),
         'current_user': getattr(g, 'current_user', None),
+        'min_password_length': MIN_PASSWORD_LENGTH,
     }
 
 def login_ip_hash():
@@ -379,9 +454,9 @@ def setup():
         password = request.form.get('password', '')
         email = request.form.get('email', '').strip().lower()
         business_name = request.form.get('business_name', '').strip()
-        if (not username or len(username) > 80 or len(password) < 12 or len(password) > 256
+        if (not username or len(username) > 80 or len(password) < MIN_PASSWORD_LENGTH or len(password) > 256
                 or not business_name or len(business_name) > 120 or '@' not in email):
-            flash('Enter a business name, username, valid email and a password between 12 and 256 characters.', 'error')
+            flash(f'Enter a business name, username, valid email and a password between {MIN_PASSWORD_LENGTH} and 256 characters.', 'error')
         else:
             business = Business.query.order_by(Business.id.asc()).first()
             if business:
@@ -480,8 +555,8 @@ def change_password():
         confirmation = request.form.get('confirm_password', '')
         if not check_password_hash(g.current_user.password_hash, current):
             flash('Current password is incorrect.', 'error')
-        elif len(password) < 12 or len(password) > 256 or password != confirmation:
-            flash('Use a matching new password between 12 and 256 characters.', 'error')
+        elif len(password) < MIN_PASSWORD_LENGTH or len(password) > 256 or password != confirmation:
+            flash(f'Use a matching new password between {MIN_PASSWORD_LENGTH} and 256 characters.', 'error')
         else:
             g.current_user.password_hash = generate_password_hash(password)
             g.current_user.must_change_password = False
@@ -541,8 +616,8 @@ def reset_password(token):
     if request.method == 'POST':
         password = request.form.get('password', '')
         confirmation = request.form.get('confirm_password', '')
-        if len(password) < 12 or len(password) > 256 or password != confirmation:
-            flash('Use a matching password between 12 and 256 characters.', 'error')
+        if len(password) < MIN_PASSWORD_LENGTH or len(password) > 256 or password != confirmation:
+            flash(f'Use a matching password between {MIN_PASSWORD_LENGTH} and 256 characters.', 'error')
         else:
             user = reset.user
             user.password_hash = generate_password_hash(password)
@@ -567,10 +642,16 @@ def create_business_command():
     name = click.prompt('Business name').strip()
     username = click.prompt('Administrator username').strip()
     email = click.prompt('Administrator email').strip().lower()
-    password = click.prompt('Administrator password (12+ characters)', hide_input=True, confirmation_prompt=True)
+    password = click.prompt(
+        f'Administrator password ({MIN_PASSWORD_LENGTH}+ characters)',
+        hide_input=True,
+        confirmation_prompt=True,
+    )
     if (not name or len(name) > 120 or not username or len(username) > 80
-            or '@' not in email or len(password) < 12 or len(password) > 256):
-        raise click.ClickException('Provide valid business/account details and a 12-256 character password.')
+            or '@' not in email or len(password) < MIN_PASSWORD_LENGTH or len(password) > 256):
+        raise click.ClickException(
+            f'Provide valid business/account details and a {MIN_PASSWORD_LENGTH}-256 character password.'
+        )
     if User.query.filter_by(username=username).first():
         raise click.ClickException('That username is already in use.')
     business = Business(name=name)
@@ -604,9 +685,12 @@ def admin_users():
             password = request.form.get('password', '')
             role = request.form.get('role', '')
             if (not username or len(username) > 80 or '@' not in email
-                    or len(password) < 12 or len(password) > 256
+                    or len(password) < MIN_PASSWORD_LENGTH or len(password) > 256
                     or role not in ('administrator', 'manager', 'cashier', 'stock_clerk')):
-                flash('Enter valid account details, role and a 12-256 character temporary password.', 'error')
+                flash(
+                    f'Enter valid account details, role and a {MIN_PASSWORD_LENGTH}-256 character temporary password.',
+                    'error',
+                )
             elif User.query.filter_by(username=username).first():
                 flash('That username is already in use.', 'error')
             else:
@@ -758,6 +842,73 @@ def admin_business():
             flash('Business settings saved.', 'success')
             return redirect(url_for('admin_business'))
     return render_template('admin_business.html', business=business)
+
+@app.route('/admin/api-keys', methods=['GET', 'POST'])
+@roles_required('administrator')
+def admin_api_keys():
+    new_key = None
+    if request.method == 'POST':
+        action = request.form.get('action', 'create')
+        if action == 'revoke':
+            try:
+                key_id = int(request.form.get('key_id', '0'))
+            except ValueError:
+                key_id = 0
+            key = APIKey.query.filter_by(
+                id=key_id,
+                business_id=g.business_id,
+                revoked_at=None,
+            ).first()
+            if not key:
+                abort(404)
+            key.revoked_at = datetime.utcnow()
+            record_activity(
+                'api_key_revoked', 'api_key', key.id,
+                f'Revoked API key {key.name} ({key.key_prefix})',
+            )
+            db.session.commit()
+            flash('API key revoked.', 'success')
+            return redirect(url_for('admin_api_keys'))
+
+        name = request.form.get('name', '').strip()
+        scopes = sorted(set(request.form.getlist('scopes')))
+        expiry = request.form.get('expires_in_days', '90')
+        if (not name or len(name) > 80 or not scopes
+                or any(scope not in API_KEY_SCOPES for scope in scopes)
+                or expiry not in ('30', '90', '365', 'never')):
+            flash('Enter a key name, select valid permissions and choose a valid expiry.', 'error')
+        else:
+            token = f'dsk_live_{secrets.token_urlsafe(32)}'
+            key = APIKey(
+                name=name,
+                key_hash=sha256(token.encode()).hexdigest(),
+                key_prefix=token[:16],
+                scopes=','.join(scopes),
+                business_id=g.business_id,
+                created_by_id=g.current_user.id,
+                expires_at=(
+                    datetime.utcnow() + timedelta(days=int(expiry))
+                    if expiry != 'never' else None
+                ),
+            )
+            db.session.add(key)
+            db.session.flush()
+            record_activity(
+                'api_key_created', 'api_key', key.id,
+                f'Created API key {name} with scopes {", ".join(scopes)}',
+            )
+            db.session.commit()
+            new_key = token
+    keys = APIKey.query.filter_by(
+        business_id=g.business_id,
+    ).order_by(APIKey.created_at.desc()).all()
+    return render_template(
+        'admin_api_keys.html',
+        keys=keys,
+        scopes=API_KEY_SCOPES,
+        new_key=new_key,
+        now=datetime.utcnow(),
+    )
 
 @app.route('/')
 @roles_required('administrator', 'manager')
@@ -919,6 +1070,153 @@ def api_products():
     } for p in products])
     response.headers['X-CSRF-Token'] = session['_csrf_token']
     return response
+
+def api_paginated(query, serialize=lambda item: dict(item._mapping)):
+    try:
+        page = int(request.args.get('page', '1'))
+        per_page = int(request.args.get('per_page', '50'))
+        if page < 1 or not 1 <= per_page <= 100:
+            raise ValueError()
+    except (TypeError, ValueError):
+        return api_error('invalid_pagination', 'page must be positive and per_page must be between 1 and 100.', 400)
+    result = query.paginate(page=page, per_page=per_page, error_out=False)
+    return jsonify({
+        'data': [serialize(item) for item in result.items],
+        'pagination': {
+            'page': result.page,
+            'per_page': result.per_page,
+            'total': result.total,
+            'pages': result.pages,
+            'has_next': result.has_next,
+            'has_previous': result.has_prev,
+        },
+    })
+
+@app.route('/api/v1/products')
+@api_key_required('products:read')
+def external_api_products():
+    query = Product.query.filter_by(
+        business_id=g.business_id,
+    ).order_by(Product.id.asc())
+    return api_paginated(query.with_entities(
+        Product.id.label('id'),
+        Product.name.label('name'),
+        Product.sku.label('sku'),
+        Product.cost_price.label('cost_price'),
+        Product.selling_price.label('selling_price'),
+        Product.quantity.label('quantity'),
+        Product.low_stock_at.label('low_stock_at'),
+        Product.base_unit.label('unit'),
+    ))
+
+@app.route('/api/v1/sales')
+@api_key_required('sales:read')
+def external_api_sales():
+    query = Transaction.query.filter_by(
+        business_id=g.business_id,
+        kind='sale',
+    ).order_by(Transaction.created_at.desc(), Transaction.id.desc())
+    serialized = query.with_entities(
+        Transaction.id.label('id'),
+        Transaction.description.label('description'),
+        Transaction.amount.label('amount'),
+        Transaction.quantity.label('quantity'),
+        Transaction.product_id.label('product_id'),
+        Transaction.payment_method.label('payment_method'),
+        Transaction.created_at.label('created_at'),
+    )
+    return api_paginated(serialized, lambda item: {
+            'id': item.id,
+            'description': item.description,
+            'amount': item.amount,
+            'quantity': item.quantity,
+            'product_id': item.product_id,
+            'payment_method': item.payment_method,
+            'created_at': item.created_at.isoformat() if item.created_at else None,
+        })
+
+@app.route('/api/v1/expenses')
+@api_key_required('expenses:read')
+def external_api_expenses():
+    query = Transaction.query.filter_by(
+        business_id=g.business_id,
+        kind='expense',
+    ).order_by(Transaction.created_at.desc(), Transaction.id.desc())
+    return api_paginated(query.with_entities(
+        Transaction.id.label('id'),
+        Transaction.description.label('description'),
+        Transaction.amount.label('amount'),
+        Transaction.payment_method.label('payment_method'),
+        Transaction.created_at.label('created_at'),
+    ), lambda item: {
+        'id': item.id,
+        'description': item.description,
+        'amount': item.amount,
+        'payment_method': item.payment_method,
+        'created_at': item.created_at.isoformat() if item.created_at else None,
+    })
+
+@app.route('/api/v1/credit')
+@api_key_required('credit:read')
+def external_api_credit():
+    outstanding = (CustomerDebt.amount - CustomerDebt.amount_paid).label('outstanding')
+    query = CustomerDebt.query.filter_by(
+        business_id=g.business_id,
+    ).order_by(CustomerDebt.created_at.desc(), CustomerDebt.id.desc())
+    return api_paginated(query.with_entities(
+        CustomerDebt.id.label('id'),
+        CustomerDebt.customer_name.label('customer_name'),
+        CustomerDebt.description.label('description'),
+        CustomerDebt.amount.label('amount'),
+        CustomerDebt.amount_paid.label('amount_paid'),
+        outstanding,
+        CustomerDebt.created_at.label('created_at'),
+    ), lambda item: {
+        'id': item.id,
+        'customer_name': item.customer_name,
+        'description': item.description,
+        'amount': item.amount,
+        'amount_paid': item.amount_paid,
+        'outstanding': item.outstanding,
+        'created_at': item.created_at.isoformat() if item.created_at else None,
+    })
+
+@app.route('/api/v1/reports')
+@api_key_required('reports:read')
+def external_api_reports():
+    business_id = g.business_id
+    sales_total = db.session.query(
+        func.coalesce(func.sum(Transaction.amount), 0),
+    ).filter_by(business_id=business_id, kind='sale').scalar()
+    expenses_total = db.session.query(
+        func.coalesce(func.sum(Transaction.amount), 0),
+    ).filter_by(business_id=business_id, kind='expense').scalar()
+    standard_cogs = db.session.query(
+        func.coalesce(func.sum(Transaction.quantity * Product.cost_price), 0),
+    ).join(Product, Product.id == Transaction.product_id).filter(
+        Transaction.business_id == business_id,
+        Transaction.kind == 'sale',
+        Transaction.sale_id.is_(None),
+        Product.business_id == business_id,
+    ).scalar()
+    checkout_cogs = db.session.query(
+        func.coalesce(func.sum(CheckoutLine.quantity * CheckoutLine.unit_cost), 0),
+    ).join(CheckoutSale, CheckoutSale.id == CheckoutLine.sale_id).filter(
+        CheckoutSale.business_id == business_id,
+    ).scalar()
+    stock_value = db.session.query(
+        func.coalesce(func.sum(Product.cost_price * Product.quantity), 0),
+    ).filter_by(business_id=business_id).scalar()
+    cogs = standard_cogs + checkout_cogs
+    return jsonify({'data': {
+        'sales_total': sales_total,
+        'expenses_total': expenses_total,
+        'cost_of_goods_sold': cogs,
+        'estimated_profit': sales_total - cogs - expenses_total,
+        'stock_value_at_cost': stock_value,
+        'currency': 'UGX',
+        'generated_at': datetime.utcnow().isoformat(),
+    }})
 
 @app.route('/api/sales/sync', methods=['POST'])
 @roles_required('administrator', 'manager', 'cashier')

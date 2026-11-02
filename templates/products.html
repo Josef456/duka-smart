@@ -31,12 +31,27 @@
 <section class="panel">
     <div class="panelhead"><h2>All products <span class="count">{{ products|length }}</span></h2></div>
     {% if products %}
+    <div class="inventory-filters">
+        <div>
+            <label for="inventory-search">Find a product</label>
+            <input id="inventory-search" type="search" placeholder="Search name or code" autocomplete="off">
+        </div>
+        <div>
+            <label for="inventory-stock-filter">Stock status</label>
+            <select id="inventory-stock-filter">
+                <option value="all">All products</option>
+                <option value="low">Low stock</option>
+                <option value="available">In stock</option>
+            </select>
+        </div>
+        <p class="muted" id="inventory-result-count" role="status" aria-live="polite">{{ products|length }} products</p>
+    </div>
     <div class="tablewrap">
         <table>
             <thead><tr><th>Product</th><th>Code</th><th>Stock</th><th>Cost</th><th>Selling price</th><th>Status</th></tr></thead>
             <tbody>
                 {% for p in products %}
-                <tr>
+                <tr data-inventory-row data-product-name="{{ p.name|lower }}" data-product-sku="{{ p.sku|lower }}" data-stock-status="{{ 'low' if p.quantity <= p.low_stock_at else 'available' }}">
                     <td><b>{{ p.name }}</b></td>
                     <td>{{ p.sku }}</td>
                     <td>{{ p.quantity }}</td>
@@ -45,6 +60,7 @@
                     <td>{% if p.quantity <= p.low_stock_at %}<span class="pill low">Low stock</span>{% else %}<span class="pill good">In stock</span>{% endif %}</td>
                 </tr>
                 {% endfor %}
+                <tr id="inventory-no-results" hidden><td colspan="6">No products match your search and stock filter.</td></tr>
             </tbody>
         </table>
     </div>

@@ -1,0 +1,79 @@
+{% extends 'base.html' %}
+{% block title %}API keys{% endblock %}
+{% block content %}
+<div class="pagehead">
+    <div>
+        <p class="eyebrow">INTEGRATIONS</p>
+        <h1>API keys</h1>
+        <p class="muted">Create business-scoped credentials for approved accounting and integration software.</p>
+    </div>
+</div>
+{% if new_key %}
+<section class="panel">
+    <h2>Copy your new API key now</h2>
+    <p class="muted">This secret is shown only once. Store it securely and send it only over HTTPS. Do not put it in a URL, browser page, or source control.</p>
+    <label for="new-api-key">API key</label>
+    <input id="new-api-key" value="{{ new_key }}" readonly autocomplete="off">
+    <div class="actions"><button class="btn secondary" type="button" data-copy-api-key>Copy key</button><span class="muted tiny" id="copy-key-status" role="status" aria-live="polite"></span></div>
+    <p class="muted tiny">Use it as an <code>Authorization: Bearer</code> header.</p>
+</section>
+{% endif %}
+<section class="panel">
+    <h2>Create an integration key</h2>
+    <form method="post" class="formgrid">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="create">
+        <div class="span2">
+            <label for="api-key-name">Integration name</label>
+            <input id="api-key-name" name="name" maxlength="80" required placeholder="e.g. Accounting export">
+        </div>
+        {% for scope, description in scopes.items() %}
+        <label class="scope-option"><input type="checkbox" name="scopes" value="{{ scope }}"> {{ description }}</label>
+        {% endfor %}
+        <div class="span2">
+            <label for="api-key-expiry">Expires after</label>
+            <select id="api-key-expiry" name="expires_in_days">
+                <option value="30">30 days</option>
+                <option value="90" selected>90 days</option>
+                <option value="365">1 year</option>
+                <option value="never">No expiry</option>
+            </select>
+        </div>
+        <div class="span2"><button class="btn primary">Create API key</button></div>
+    </form>
+</section>
+<section class="panel">
+    <h2>Business API keys</h2>
+    <div class="tablewrap">
+        <table>
+            <thead><tr><th>Name</th><th>Key prefix</th><th>Permissions</th><th>Created</th><th>Expires</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+                {% for key in keys %}
+                <tr>
+                    <td><b>{{ key.name }}</b></td>
+                    <td><code>{{ key.key_prefix }}…</code></td>
+                    <td>{{ key.scopes|replace(',', ', ') }}</td>
+                    <td>{{ key.created_at.strftime('%d %b %Y') }}</td>
+                    <td>{{ key.expires_at.strftime('%d %b %Y') if key.expires_at else 'Never' }}</td>
+                    <td>{{ key.last_used_at.strftime('%d %b %Y %H:%M') if key.last_used_at else 'Never' }}</td>
+                    <td>{% if key.revoked_at %}<span class="pill low">Revoked</span>{% elif key.expires_at and key.expires_at <= now %}<span class="pill low">Expired</span>{% else %}<span class="pill good">Active</span>{% endif %}</td>
+                    <td>{% if not key.revoked_at and (not key.expires_at or key.expires_at > now) %}
+                        <form method="post">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <input type="hidden" name="action" value="revoke">
+                            <input type="hidden" name="key_id" value="{{ key.id }}">
+                            <button class="btn secondary smallbtn">Revoke</button>
+                        </form>
+                    {% endif %}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="8">No API keys have been created.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+<section class="notice">
+    <b>Current API:</b> read-only endpoints are available at <code>/api/v1/products</code> and <code>/api/v1/sales</code>. Each key is restricted to the selected permissions and this business, and is limited to 120 requests per minute. Account and security administration are not exposed through API keys.
+</section>
+{% endblock %}

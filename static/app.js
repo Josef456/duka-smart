@@ -61,6 +61,8 @@ function createSaleId() {
 
 document.addEventListener('DOMContentLoaded', async () => {
     const productSelect = document.getElementById('product');
+    const productSearch = document.getElementById('product-search');
+    const productSearchResults = document.getElementById('product-search-results');
     const quantityInput = document.getElementById('quantity');
     const total = document.getElementById('total');
     const form = document.querySelector('[data-sale-form]');
@@ -117,20 +119,34 @@ document.addEventListener('DOMContentLoaded', async () => {
     const renderProducts = () => {
         if (productSelect) {
             const selected = productSelect.value;
+            const searchTerm = (productSearch?.value || '').trim().toLocaleLowerCase();
+            const matchingProducts = products.filter(product =>
+                product.name.toLocaleLowerCase().includes(searchTerm)
+                || (product.sku || '').toLocaleLowerCase().includes(searchTerm),
+            );
             const queuedByProduct = new Map();
             pendingSales.forEach(sale => {
                 queuedByProduct.set(sale.product_id, (queuedByProduct.get(sale.product_id) || 0) + sale.quantity);
             });
-            productSelect.replaceChildren(new Option('Choose product', ''));
-            products.forEach(product => {
+            productSelect.replaceChildren(new Option(
+                matchingProducts.length ? 'Choose product' : 'No matching products',
+                '',
+            ));
+            matchingProducts.forEach(product => {
                 const stock = Math.max(0, product.quantity - (queuedByProduct.get(product.id) || 0));
                 const option = new Option(`${product.name} — ${stock} in stock — UGX ${Number(product.selling_price).toLocaleString('en-UG')}`, product.id);
+                option.dataset.sku = (product.sku || '').toLocaleLowerCase();
                 option.dataset.price = product.selling_price;
                 option.dataset.stock = String(stock);
                 option.disabled = stock === 0;
                 productSelect.add(option);
             });
-            if (products.some(product => String(product.id) === selected)) productSelect.value = selected;
+            if (matchingProducts.some(product => String(product.id) === selected)) {
+                productSelect.value = selected;
+            }
+            if (productSearchResults) {
+                productSearchResults.textContent = `${matchingProducts.length} product${matchingProducts.length === 1 ? '' : 's'} found.`;
+            }
             updateTotal();
         }
         renderPendingSales();
@@ -256,6 +272,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     productSelect?.addEventListener('change', updateTotal);
+    productSearch?.addEventListener('input', () => {
+        productSelect.value = '';
+        renderProducts();
+    });
     quantityInput?.addEventListener('input', updateTotal);
     window.addEventListener('online', async () => {
         try {
@@ -345,7 +365,47 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 });
 
+const inventorySearch = document.getElementById('inventory-search');
+const inventoryStockFilter = document.getElementById('inventory-stock-filter');
+if (inventorySearch && inventoryStockFilter) {
+    const inventoryRows = Array.from(document.querySelectorAll('[data-inventory-row]'));
+    const inventoryNoResults = document.getElementById('inventory-no-results');
+    const inventoryResultCount = document.getElementById('inventory-result-count');
+    const filterInventory = () => {
+        const searchTerm = inventorySearch.value.trim().toLocaleLowerCase();
+        const stockFilter = inventoryStockFilter.value;
+        let visibleCount = 0;
+        inventoryRows.forEach(row => {
+            const matchesSearch = row.dataset.productName.includes(searchTerm)
+                || row.dataset.productSku.includes(searchTerm);
+            const matchesStock = stockFilter === 'all' || row.dataset.stockStatus === stockFilter;
+            row.hidden = !(matchesSearch && matchesStock);
+            if (!row.hidden) visibleCount += 1;
+        });
+        if (inventoryNoResults) inventoryNoResults.hidden = visibleCount > 0;
+        if (inventoryResultCount) {
+            inventoryResultCount.textContent = `${visibleCount} of ${inventoryRows.length} product${inventoryRows.length === 1 ? '' : 's'}`;
+        }
+    };
+    inventorySearch.addEventListener('input', filterInventory);
+    inventoryStockFilter.addEventListener('change', filterInventory);
+}
+
 document.querySelector('[data-print]')?.addEventListener('click', () => window.print());
+document.querySelector('[data-copy-api-key]')?.addEventListener('click', async () => {
+    const input = document.getElementById('new-api-key');
+    const status = document.getElementById('copy-key-status');
+    if (!input || !status) return;
+    try {
+        await navigator.clipboard.writeText(input.value);
+        status.textContent = 'API key copied.';
+    } catch (error) {
+        console.error('Could not copy API key to clipboard:', error);
+        input.select();
+        input.setSelectionRange(0, input.value.length);
+        status.textContent = 'Select the highlighted key and copy it manually.';
+    }
+});
 if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/service-worker.js').catch(error => {
         console.error('Service worker registration failed:', error);
