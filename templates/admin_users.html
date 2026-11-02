@@ -9,7 +9,7 @@
         <div><label for="new-username">Username</label><input id="new-username" name="username" maxlength="80" required></div>
         <div><label for="new-email">Email</label><input id="new-email" name="email" type="email" maxlength="254" required></div>
         <div><label for="new-role">Role</label><select id="new-role" name="role"><option value="manager">Manager</option><option value="cashier">Cashier</option><option value="stock_clerk">Stock clerk</option><option value="administrator">Administrator</option></select></div>
-        <div><label for="temporary-password">Temporary password (12+ characters)</label><input id="temporary-password" name="password" type="password" minlength="12" maxlength="256" required autocomplete="new-password"></div>
+        <div><label for="temporary-password">Temporary password ({{ min_password_length }}+ characters)</label><input id="temporary-password" name="password" type="password" minlength="{{ min_password_length }}" maxlength="256" required autocomplete="new-password"></div>
         <div class="span2"><button class="btn primary">Create account</button><small class="muted">Give this password to the employee securely; they must change it after signing in.</small></div>
     </form>
 </section>

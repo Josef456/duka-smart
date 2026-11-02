@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -38,6 +39,7 @@ class DukaApplicationTests(unittest.TestCase):
             application.ActivityLog.query.delete()
             application.LoginEvent.query.delete()
             application.UserSession.query.delete()
+            application.APIKey.query.delete()
             application.SalePayment.query.delete()
             application.CheckoutLine.query.delete()
             application.Transaction.query.delete()
@@ -90,6 +92,18 @@ class DukaApplicationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 302)
         return response
+
+    def create_api_key(self, scopes=('products:read', 'sales:read')):
+        response = self.post_form('/admin/api-keys', {
+            'action': 'create',
+            'name': 'Accounting export',
+            'scopes': list(scopes),
+            'expires_in_days': '90',
+        })
+        self.assertEqual(response.status_code, 200)
+        match = re.search(r'id="new-api-key" value="([^"]+)"', response.get_data(as_text=True))
+        self.assertIsNotNone(match)
+        return match.group(1)
 
     def test_bar_mode_routes_are_retired_and_regular_pages_remain(self):
         self.login()
@@ -178,6 +192,236 @@ class DukaApplicationTests(unittest.TestCase):
         self.assertEqual(self.client.get('/logout').status_code, 405)
         self.assertEqual(self.client.post('/logout').status_code, 400)
         self.assertEqual(self.client.post('/api/sales/sync', json={'sales': []}).status_code, 400)
+
+    def test_initial_administrator_can_use_four_character_password(self):
+        with self.app.app_context():
+            application.User.query.filter_by(username='duka-admin').delete()
+            self.db.session.commit()
+        response = self.post_form('/setup', {
+            'business_name': 'Test Shop',
+            'username': 'short-password-admin',
+            'email': 'short-password@example.test',
+            'password': 'abcd',
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.location.endswith('/login'))
+        with self.app.app_context():
+            user = application.User.query.filter_by(username='short-password-admin').one()
+            self.assertTrue(application.check_password_hash(user.password_hash, 'abcd'))
+
+    def test_external_api_credentials_are_hashed_scoped_and_revocable(self):
+        self.login()
+        admin_page = self.client.get('/admin/api-keys')
+        self.assertEqual(admin_page.status_code, 200)
+        self.assertIn('Create an integration key', admin_page.get_data(as_text=True))
+        token = self.create_api_key()
+        with self.app.app_context():
+            key = application.APIKey.query.one()
+            key_id = key.id
+            self.assertNotEqual(key.key_hash, token)
+            self.assertEqual(key.key_hash, application.sha256(token.encode()).hexdigest())
+            self.assertEqual(key.business_id, application.User.query.filter_by(
+                username='duka-admin',
+            ).one().business_id)
+
+        headers = {'Authorization': f'Bearer {token}'}
+        products = self.client.get('/api/v1/products?per_page=10', headers=headers)
+        self.assertEqual(products.status_code, 200)
+        self.assertEqual(products.get_json()['data'], [])
+        self.assertEqual(products.get_json()['pagination']['per_page'], 10)
+        self.assertEqual(self.client.get('/api/v1/sales', headers=headers).status_code, 200)
+
+        anonymous = self.app.test_client()
+        unauthorized = anonymous.get('/api/v1/products')
+        self.assertEqual(unauthorized.status_code, 401)
+        self.assertEqual(unauthorized.get_json()['error']['code'], 'authentication_required')
+
+        revoked = self.post_form('/admin/api-keys', {
+            'action': 'revoke',
+            'key_id': str(key_id),
+        })
+        self.assertEqual(revoked.status_code, 302)
+        self.assertEqual(self.client.get('/api/v1/products', headers=headers).status_code, 401)
+        page = self.client.get('/admin/api-keys').get_data(as_text=True)
+        self.assertIn('Revoked', page)
+        self.assertNotIn(token, page)
+
+    def test_external_api_enforces_scopes_tenant_isolation_and_pagination(self):
+        with self.app.app_context():
+            business_id = application.User.query.filter_by(username='duka-admin').one().business_id
+            self.db.session.add_all([
+                application.Product(
+                    name='Tea', sku='TEA-001', cost_price=100, selling_price=200,
+                    quantity=10, low_stock_at=2, business_id=business_id,
+                ),
+                application.Product(
+                    name='Rice', sku='RICE-001', cost_price=500, selling_price=700,
+                    quantity=8, low_stock_at=2, business_id=business_id,
+                ),
+            ])
+            other_business = application.Business(name='External API Other Shop')
+            self.db.session.add(other_business)
+            self.db.session.flush()
+            self.db.session.add(application.Product(
+                name='Private item', sku='PRIVATE-001', cost_price=1, selling_price=2,
+                quantity=1, low_stock_at=0, business_id=other_business.id,
+            ))
+            self.db.session.commit()
+
+        self.login()
+        token = self.create_api_key(scopes=('products:read',))
+        headers = {'Authorization': f'Bearer {token}'}
+        first_page = self.client.get('/api/v1/products?page=1&per_page=1', headers=headers)
+        self.assertEqual(first_page.status_code, 200)
+        self.assertEqual(first_page.get_json()['pagination']['total'], 2)
+        self.assertTrue(first_page.get_json()['pagination']['has_next'])
+        self.assertIn(first_page.get_json()['data'][0]['sku'], ('TEA-001', 'RICE-001'))
+        self.assertNotIn('Private item', first_page.get_data(as_text=True))
+        denied = self.client.get('/api/v1/sales', headers=headers)
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.get_json()['error']['code'], 'insufficient_scope')
+        invalid_page = self.client.get('/api/v1/products?per_page=101', headers=headers)
+        self.assertEqual(invalid_page.status_code, 400)
+        self.assertEqual(invalid_page.get_json()['error']['code'], 'invalid_pagination')
+
+    def test_external_expense_credit_and_reports_endpoints_are_scoped(self):
+        with self.app.app_context():
+            business_id = application.User.query.filter_by(username='duka-admin').one().business_id
+            product = application.Product(
+                name='Flour',
+                sku='FLOUR-001',
+                cost_price=300,
+                selling_price=500,
+                quantity=4,
+                low_stock_at=1,
+                business_id=business_id,
+            )
+            self.db.session.add(product)
+            self.db.session.flush()
+            self.db.session.add_all([
+                application.Transaction(
+                    kind='sale',
+                    description='Flour x 2',
+                    amount=1000,
+                    quantity=2,
+                    product_id=product.id,
+                    business_id=business_id,
+                    payment_method='Cash',
+                ),
+                application.Transaction(
+                    kind='expense',
+                    description='Shop rent',
+                    amount=200,
+                    business_id=business_id,
+                    payment_method='Cash',
+                ),
+                application.CustomerDebt(
+                    customer_name='Customer One',
+                    phone='0700000000',
+                    description='Flour on credit',
+                    amount=800,
+                    amount_paid=300,
+                    business_id=business_id,
+                ),
+            ])
+            other_business = application.Business(name='Accounting API Other Shop')
+            self.db.session.add(other_business)
+            self.db.session.flush()
+            self.db.session.add(application.Transaction(
+                kind='expense',
+                description='Private rent',
+                amount=9999,
+                business_id=other_business.id,
+            ))
+            self.db.session.add(application.CustomerDebt(
+                customer_name='Private customer',
+                description='Private credit',
+                amount=5000,
+                amount_paid=0,
+                business_id=other_business.id,
+            ))
+            self.db.session.commit()
+
+        self.login()
+        token = self.create_api_key((
+            'expenses:read',
+            'credit:read',
+            'reports:read',
+        ))
+        headers = {'Authorization': f'Bearer {token}'}
+
+        expenses = self.client.get('/api/v1/expenses', headers=headers)
+        self.assertEqual(expenses.status_code, 200)
+        self.assertEqual(expenses.get_json()['data'][0]['description'], 'Shop rent')
+        self.assertNotIn('Private rent', expenses.get_data(as_text=True))
+
+        credit = self.client.get('/api/v1/credit', headers=headers)
+        self.assertEqual(credit.status_code, 200)
+        credit_data = credit.get_json()['data'][0]
+        self.assertEqual(credit_data['outstanding'], 500)
+        self.assertNotIn('phone', credit_data)
+        self.assertNotIn('Private customer', credit.get_data(as_text=True))
+
+        reports = self.client.get('/api/v1/reports', headers=headers)
+        self.assertEqual(reports.status_code, 200)
+        report_data = reports.get_json()['data']
+        self.assertEqual(report_data['sales_total'], 1000)
+        self.assertEqual(report_data['expenses_total'], 200)
+        self.assertEqual(report_data['cost_of_goods_sold'], 600)
+        self.assertEqual(report_data['estimated_profit'], 200)
+        self.assertEqual(report_data['stock_value_at_cost'], 1200)
+
+        missing_scope = self.client.get(
+            '/api/v1/reports',
+            headers={'Authorization': f'Bearer {self.create_api_key(("products:read",))}'},
+        )
+        self.assertEqual(missing_scope.status_code, 403)
+
+    def test_inventory_and_sales_pages_include_product_search_controls(self):
+        with self.app.app_context():
+            business_id = application.User.query.filter_by(username='duka-admin').one().business_id
+            self.db.session.add(application.Product(
+                name='Cooking oil',
+                sku='OIL-001',
+                cost_price=1000,
+                selling_price=1500,
+                quantity=4,
+                low_stock_at=1,
+                business_id=business_id,
+            ))
+            self.db.session.commit()
+        self.login()
+        inventory = self.client.get('/products').get_data(as_text=True)
+        self.assertIn('id="inventory-search"', inventory)
+        self.assertIn('id="inventory-stock-filter"', inventory)
+        self.assertIn('data-product-sku="oil-001"', inventory)
+        sales = self.client.get('/sales').get_data(as_text=True)
+        self.assertIn('id="product-search"', sales)
+        self.assertIn('name="product_id"', sales)
+
+    def test_external_api_rate_limit_and_expiry(self):
+        self.login()
+        token = self.create_api_key(scopes=('products:read',))
+        headers = {'Authorization': f'Bearer {token}'}
+        with self.app.app_context():
+            key = application.APIKey.query.one()
+            key.rate_window_started_at = application.datetime.utcnow()
+            key.rate_request_count = application.API_KEY_RATE_LIMIT
+            self.db.session.commit()
+        limited = self.client.get('/api/v1/products', headers=headers)
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(limited.get_json()['error']['code'], 'rate_limit_exceeded')
+        self.assertGreaterEqual(int(limited.headers['Retry-After']), 1)
+
+        with self.app.app_context():
+            key = application.APIKey.query.one()
+            key.expires_at = application.datetime.utcnow() - application.timedelta(seconds=1)
+            key.rate_window_started_at = None
+            key.rate_request_count = 0
+            self.db.session.commit()
+        expired = self.client.get('/api/v1/products', headers=headers)
+        self.assertEqual(expired.status_code, 401)
+        self.assertEqual(expired.get_json()['error']['code'], 'invalid_api_key')
 
     def test_historical_checkout_transactions_remain_reportable(self):
         with self.app.app_context():
