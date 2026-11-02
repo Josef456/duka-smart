@@ -1,4 +1,4 @@
-const CACHE_NAME = 'dukas-smart-shell-v5';
+const CACHE_NAME = 'dukas-smart-shell-v6';
 const APP_SHELL = [
     '/static/style.css',
     '/static/app.js',
