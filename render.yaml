@@ -25,7 +25,45 @@ services:
         sync: false
       - key: MAIL_FROM
         sync: false
+  - type: web
+    name: dukasmart-uganda-staging
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: flask --app app db upgrade && gunicorn app:app
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: dukasmart-staging-db
+          property: connectionString
+  - type: cron
+    name: dukasmart-postgres-backup
+    runtime: docker
+    schedule: "0 2 * * *"
+    dockerfilePath: ./Dockerfile.backup
+    dockerContext: .
+    envVars:
+      - key: BACKUP_DATABASE_URL
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_REGION
+        sync: false
+      - key: BACKUP_S3_BUCKET
+        sync: false
+      - key: BACKUP_S3_PREFIX
+        value: dukasmart/production
 databases:
   - name: dukasmart-db
     databaseName: dukasmart
     user: dukasmart
+  - name: dukasmart-staging-db
+    databaseName: dukasmart_staging
+    user: dukasmart_staging
+    plan: free

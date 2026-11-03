@@ -55,6 +55,43 @@ Session records expire eight hours after sign-in and are checked on each protect
 
 Email password resets require the following environment variables; configure them in the deployment provider, never in source control: `APP_BASE_URL` (production must be HTTPS), `MAIL_SERVER`, `MAIL_PORT` (default `587`), `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`, and optionally `MAIL_USE_TLS` (default `true`). For Gmail, use `smtp.gmail.com`, port `587`, and TLS. Use a Google App Password (not the normal Google account password); App Passwords require 2-Step Verification and may be disabled by Google Workspace administrators. Set `MAIL_USERNAME` and `MAIL_FROM` to the sending Gmail address. In Render, set the mail variables and the public HTTPS app URL in the service's Environment settings; the Render blueprint provides Gmail SMTP defaults and leaves the private values for entry in the dashboard. For local PowerShell runs, set the same variables in the terminal that starts Flask; use `APP_BASE_URL=http://127.0.0.1:5000` for local testing, whose reset link only works on that computer. Keep SMTP credentials private. Reset links are random, stored as hashes, expire after 30 minutes, and can be used once. Reset requests require both the account username and email and return the same response whether or not the account exists. Delivery failures are logged in the server logs while the public response stays generic to prevent account enumeration.
 
-Security hardening includes CSRF checks on form/API writes, security response headers, secure session-cookie settings in production, a 4-character minimum for newly created passwords, and database-backed sign-in throttling (five failed attempts per client IP per 15-minute window). A 4-character minimum is weak; use a long, unique password, especially for administrator accounts. The `0004_security_hardening` migration stores keyed client-IP hashes rather than raw addresses. Production (`RENDER`, `APP_ENV=production`, or `FLASK_ENV=production`) requires `SESSION_SECRET` to be at least 32 characters; the Render blueprint generates this value. Local development without a configured secret uses a temporary random key, so sessions expire when the app restarts.
+### PostgreSQL backups and recovery
 
-The existing `/sales` page remains available for one-product sales and offline synchronization; offline conflicts remain queued for review. Offline expenses, customer credit, and inventory changes are not available offline. Payment methods are labels only; the application does not collect card or Mobile Money funds. This is an early MVP, not production-ready accounting software. There is no EFRIS integration, tax filing, automatic Mobile Money collection, audit-grade accounting, export/restore workflow, or exhaustive automated test suite. Profit is an estimate and needs accounting validation. This hardening is a baseline, not a substitute for a professional security review. Before commercial launch, implement data export and backup/restore, reviewed offline conflict handling, privacy terms, security tests and review of current URA requirements.
+The Render deployment uses managed PostgreSQL. Render documents point-in-time recovery for paid PostgreSQL instances; Free instances do not have managed recovery. The recovery window depends on the plan and is shown in the database's **Recovery** page. Render also supports logical exports, but exports are retained for seven days; Free instances do not receive automatic logical backups. Check the current plan and Recovery page in the Render Dashboard rather than assuming this service is covered.
+
+The Render blueprint defines a daily 02:00 UTC Cron job. It writes custom-format `pg_dump` archives to a private S3 bucket using server-side encryption, verifies each archive with `pg_restore --list`, and removes the temporary dump after upload. Before syncing the blueprint, create a private S3 bucket with Block Public Access enabled, default encryption enabled, and a 30-day expiration lifecycle rule scoped to `dukasmart/production/`. Create a dedicated IAM access key restricted to `s3:PutObject` on that prefix only. In the production database, create a read-only role for the job and set a password using `\password dukasmart_backup` in `psql`; grant it `CONNECT`, `USAGE` on schema `public`, and `SELECT` on current tables and sequences. Also grant default `SELECT` privileges on future tables/sequences for the role that runs migrations. Set `BACKUP_DATABASE_URL` to that role's Render internal PostgreSQL connection URL. In Render, set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, and `BACKUP_S3_BUCKET` on the backup Cron service. When updating an existing Render Blueprint, add these `sync: false` secrets manually in the service Environment settings; Render does not automatically add them on updates. Never put these credentials in source control or chat. Render Cron jobs have a minimum monthly charge, and AWS storage/requests may also incur charges. The service uses a read-only database role and does not issue database writes.
+
+Run the following SQL while connected to the production database as its owner, then use the interactive `psql` `\password dukasmart_backup` command to set a strong password without putting it into SQL history:
+
+```sql
+CREATE ROLE dukasmart_backup LOGIN;
+GRANT CONNECT ON DATABASE dukasmart TO dukasmart_backup;
+GRANT USAGE ON SCHEMA public TO dukasmart_backup;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO dukasmart_backup;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO dukasmart_backup;
+ALTER DEFAULT PRIVILEGES FOR ROLE dukasmart IN SCHEMA public
+    GRANT SELECT ON TABLES TO dukasmart_backup;
+ALTER DEFAULT PRIVILEGES FOR ROLE dukasmart IN SCHEMA public
+    GRANT SELECT ON SEQUENCES TO dukasmart_backup;
+```
+
+For the IAM policy, replace `YOUR_BUCKET_NAME` and apply only this object-write permission to the dedicated key:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "s3:PutObject",
+    "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/dukasmart/production/*"
+  }]
+}
+```
+
+To test recovery, download an archive and restore it into a separate, access-restricted, temporary PostgreSQL recovery database. Do not connect application services to that database, restore over production, or copy production data into the synthetic-data staging service. Validate the restored schema and representative records, then delete the temporary recovery database after the drill. The blueprint also defines a separate Free staging web service/database for synthetic workflow testing; do not enter real customer data there. Treat Free staging resources and their data as disposable and subject to provider limits. The staging service is intentionally not connected to the production database.
+
+The local test suite exercises application workflows with synthetic records in an isolated temporary database. It cannot prove the live Render Cron job, AWS bucket permissions/lifecycle, or a full PostgreSQL restore. Those remain to be verified after configuring the Render and AWS settings.
+
+Security hardening includes CSRF checks on form/API writes, security response headers, secure session-cookie settings in production, a 12-character minimum for newly set passwords, HTTPS redirects in production, and database-backed sign-in throttling (five failed attempts per client IP per 15-minute window). Choose a unique password, especially for administrator accounts. Accounts with an existing password shorter than 12 characters are required to change it after their next successful sign-in; existing password hashes are not reset or removed. The `0004_security_hardening` migration stores keyed client-IP hashes rather than raw addresses. Production (`RENDER`, `APP_ENV=production`, or `FLASK_ENV=production`) requires `SESSION_SECRET` to be at least 32 characters; the Render blueprint generates this value. Local development without a configured secret uses a temporary random key, so sessions expire when the app restarts.
+
+The existing `/sales` page remains available for one-product sales and offline synchronization; offline conflicts remain queued for review. Offline expenses, customer credit, and inventory changes are not available offline. Payment methods are labels only; the application does not collect card or Mobile Money funds. This is an early MVP, not production-ready accounting software. There is no EFRIS integration, tax filing, automatic Mobile Money collection, audit-grade accounting, user-facing export/restore workflow, or exhaustive automated test suite. The scheduled database backup still requires AWS bucket setup and deployment; a full PostgreSQL restore drill has not yet been run. Profit is an estimate and needs accounting validation. This hardening is a baseline, not a substitute for a professional security review. Before commercial launch, verify the backup/restore process, review offline conflict handling, add privacy terms, expand security tests and review current URA requirements.

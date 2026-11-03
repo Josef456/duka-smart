@@ -179,6 +179,51 @@ class DukaApplicationTests(unittest.TestCase):
             headers={'X-CSRF-Token': self.csrf_token()},
         )
         self.assertEqual(response.status_code, 200)
+        sale_payload = {
+            'sales': [{
+                'id': '6b3b0d45-a73c-43ee-bdde-94dcff0f8841',
+                'owner': 'duka-admin',
+                'product_id': product_id,
+                'quantity': 1,
+                'payment_method': 'Cash',
+                'sold_at': '2026-11-02T10:00:00Z',
+                'unit_price': 3000,
+            }],
+        }
+        headers = {'X-CSRF-Token': self.csrf_token()}
+        synced = self.client.post('/api/sales/sync', json=sale_payload, headers=headers)
+        duplicate = self.client.post('/api/sales/sync', json=sale_payload, headers=headers)
+        self.assertEqual(synced.json['results'][0]['status'], 'synced')
+        self.assertEqual(duplicate.json['results'][0]['status'], 'duplicate')
+        with self.app.app_context():
+            self.assertEqual(self.db.session.get(application.Product, product_id).quantity, 2)
+            self.assertEqual(application.Transaction.query.filter_by(sync_id=sale_payload['sales'][0]['id']).count(), 1)
+
+    def test_sale_with_insufficient_stock_does_not_change_stock_or_write_sale(self):
+        with self.app.app_context():
+            product = application.Product(
+                name='Limited stock item',
+                sku='LIMITED-001',
+                cost_price=2000,
+                selling_price=3000,
+                quantity=1,
+                low_stock_at=0,
+                business_id=application.Business.query.first().id,
+            )
+            self.db.session.add(product)
+            self.db.session.commit()
+            product_id = product.id
+        self.login()
+        response = self.post_form('/sales', {
+            'product_id': str(product_id),
+            'quantity': '2',
+            'payment_method': 'Cash',
+        })
+        self.assertEqual(response.status_code, 200)
+        with self.app.app_context():
+            self.assertEqual(self.db.session.get(application.Product, product_id).quantity, 1)
+            self.assertEqual(application.Transaction.query.filter_by(kind='sale').count(), 0)
+            self.assertEqual(application.StockMovement.query.filter_by(product_id=product_id).count(), 0)
 
     def test_login_csrf_protection_and_throttling_remain_enabled(self):
         self.client.get('/login')
@@ -193,21 +238,68 @@ class DukaApplicationTests(unittest.TestCase):
         self.assertEqual(self.client.post('/logout').status_code, 400)
         self.assertEqual(self.client.post('/api/sales/sync', json={'sales': []}).status_code, 400)
 
-    def test_initial_administrator_can_use_four_character_password(self):
+    def test_production_requests_redirect_to_https(self):
+        with patch.object(application, 'production', True):
+            response = self.client.get('/login', base_url='http://dukas.example.test')
+        self.assertEqual(response.status_code, 308)
+        self.assertEqual(response.headers['Location'], 'https://dukas.example.test/login')
+
+    def test_initial_administrator_requires_twelve_character_password(self):
         with self.app.app_context():
             application.User.query.filter_by(username='duka-admin').delete()
             self.db.session.commit()
-        response = self.post_form('/setup', {
+        short_password_response = self.post_form('/setup', {
             'business_name': 'Test Shop',
             'username': 'short-password-admin',
             'email': 'short-password@example.test',
-            'password': 'abcd',
+            'password': 'too-short',
+        })
+        self.assertEqual(short_password_response.status_code, 200)
+        with self.app.app_context():
+            self.assertIsNone(application.User.query.filter_by(username='short-password-admin').first())
+        response = self.post_form('/setup', {
+            'business_name': 'Test Shop',
+            'username': 'long-password-admin',
+            'email': 'long-password@example.test',
+            'password': 'Long-password-2026',
         })
         self.assertEqual(response.status_code, 302)
         self.assertTrue(response.location.endswith('/login'))
         with self.app.app_context():
-            user = application.User.query.filter_by(username='short-password-admin').one()
-            self.assertTrue(application.check_password_hash(user.password_hash, 'abcd'))
+            user = application.User.query.filter_by(username='long-password-admin').one()
+            self.assertTrue(application.check_password_hash(user.password_hash, 'Long-password-2026'))
+
+    def test_existing_short_password_is_forced_to_change_after_signin(self):
+        with self.app.app_context():
+            business_id = application.Business.query.first().id
+            user = application.User(
+                username='legacy-admin',
+                password_hash=application.generate_password_hash('weak'),
+                business_id=business_id,
+                email='legacy-admin@example.test',
+                role='administrator',
+            )
+            self.db.session.add(user)
+            self.db.session.commit()
+        client = self.app.test_client()
+        login = self.post_form('/login', {
+            'username': 'legacy-admin',
+            'password': 'weak',
+        }, client=client)
+        self.assertEqual(login.status_code, 302)
+        self.assertTrue(client.get('/').location.endswith('/account/password'))
+        changed = self.post_form('/account/password', {
+            'current_password': 'weak',
+            'password': 'New-unique-password-2026',
+            'confirm_password': 'New-unique-password-2026',
+        }, client=client)
+        self.assertEqual(changed.status_code, 302)
+        with self.app.app_context():
+            user = application.User.query.filter_by(username='legacy-admin').one()
+            self.assertFalse(user.must_change_password)
+            self.assertTrue(application.check_password_hash(
+                user.password_hash, 'New-unique-password-2026',
+            ))
 
     def test_external_api_credentials_are_hashed_scoped_and_revocable(self):
         self.login()
@@ -511,6 +603,23 @@ class DukaApplicationTests(unittest.TestCase):
         self.assertEqual(stock_clerk.get('/products').status_code, 200)
         self.assertEqual(stock_clerk.get('/sales').status_code, 403)
 
+    def test_navigation_has_accessible_active_state_and_role_scoped_items(self):
+        self.login()
+        dashboard = self.client.get('/').get_data(as_text=True)
+        self.assertIn('aria-label="Main navigation"', dashboard)
+        self.assertIn('href="/" class="nav-link active" aria-current="page"', dashboard)
+        self.assertIn('<span>Dashboard</span>', dashboard)
+        self.assertIn('viewBox="0 0 24 24"', dashboard)
+
+        self.create_user('nav-cashier', 'cashier')
+        cashier = self.app.test_client()
+        self.login_as(cashier, 'nav-cashier', 'employee-temp-123')
+        sales_page = cashier.get('/sales').get_data(as_text=True)
+        self.assertIn('aria-current="page"', sales_page)
+        self.assertIn('<span>Sales</span>', sales_page)
+        self.assertNotIn('<span>Reports</span>', sales_page)
+        self.assertNotIn('<span>Business settings</span>', sales_page)
+
     def test_admin_can_create_and_disable_employee_and_sessions_are_revoked(self):
         self.login()
         response = self.post_form('/admin/users', {
@@ -634,6 +743,11 @@ class DukaApplicationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(send_email.called)
         token = send_email.call_args.args[1]
+        short_password_response = self.post_form(f'/reset-password/{token}', {
+            'password': 'too-short',
+            'confirm_password': 'too-short',
+        })
+        self.assertEqual(short_password_response.status_code, 200)
         reset_response = self.post_form(f'/reset-password/{token}', {
             'password': 'reset-password-789012',
             'confirm_password': 'reset-password-789012',

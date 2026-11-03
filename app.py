@@ -16,7 +16,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from werkzeug.security import generate_password_hash, check_password_hash
 
-MIN_PASSWORD_LENGTH = 4
+MIN_PASSWORD_LENGTH = 12
 
 app = Flask(__name__)
 production = (
@@ -335,6 +335,8 @@ def role_home_endpoint(role):
 
 @app.before_request
 def protect_state_changing_requests():
+    if production and not request.is_secure:
+        return redirect(request.url.replace('http://', 'https://', 1), code=308)
     session.setdefault('_csrf_token', secrets.token_urlsafe(32))
     if request.method not in ('POST', 'PUT', 'PATCH', 'DELETE'):
         return None
@@ -503,6 +505,8 @@ def login():
         if user and user.is_active and check_password_hash(user.password_hash, password):
             if attempt:
                 db.session.delete(attempt)
+            if len(password) < MIN_PASSWORD_LENGTH:
+                user.must_change_password = True
             user.last_login_at = now
             session.clear()
             session['_csrf_token'] = secrets.token_urlsafe(32)
