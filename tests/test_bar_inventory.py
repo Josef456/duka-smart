@@ -146,6 +146,124 @@ class DukaApplicationTests(unittest.TestCase):
         self.assertNotIn('Drink (Bar Mode)', page)
         self.assertNotIn('purchase pack', page.lower())
 
+    def test_admin_can_adjust_stock_with_audited_movement(self):
+        self.login()
+        created = self.post_form('/products', {
+            'name': 'Soda',
+            'sku': 'SODA-001',
+            'quantity': '8',
+            'cost_price': '1000',
+            'selling_price': '1500',
+            'low_stock_at': '2',
+        })
+        self.assertEqual(created.status_code, 302)
+        with self.app.app_context():
+            product_id = application.Product.query.filter_by(sku='SODA-001').one().id
+
+        adjusted = self.post_form(f'/products/{product_id}/adjust-stock', {
+            'adjustment_type': 'add',
+            'quantity': '5',
+            'reason': 'Supplier delivery',
+        })
+        self.assertEqual(adjusted.status_code, 302)
+        with self.app.app_context():
+            product = self.db.session.get(application.Product, product_id)
+            self.assertEqual(product.quantity, 13)
+            movement = application.StockMovement.query.filter_by(
+                product_id=product_id,
+                movement_type='adjustment',
+            ).one()
+            self.assertEqual(movement.quantity_delta, 5)
+            self.assertEqual(movement.reason, 'Supplier delivery')
+            self.assertEqual(movement.unit_cost, 1000)
+            self.assertEqual(movement.created_by.username, 'duka-admin')
+            audit = application.ActivityLog.query.filter_by(
+                action='stock_adjusted',
+                entity_id=str(product_id),
+            ).order_by(application.ActivityLog.id.desc()).first()
+            self.assertIn('Supplier delivery', audit.summary)
+        page = self.client.get('/products').get_data(as_text=True)
+        self.assertIn('Adjust stock', page)
+        self.assertIn('Supplier delivery', page)
+
+    def test_stock_adjustment_rejects_negative_stock_and_missing_reason(self):
+        with self.app.app_context():
+            product = application.Product(
+                name='Limited stock item',
+                sku='LIMITED-ADJUST-001',
+                cost_price=2000,
+                selling_price=3000,
+                quantity=3,
+                low_stock_at=1,
+                business_id=application.Business.query.first().id,
+            )
+            self.db.session.add(product)
+            self.db.session.commit()
+            product_id = product.id
+        self.login()
+
+        too_much = self.post_form(f'/products/{product_id}/adjust-stock', {
+            'adjustment_type': 'remove',
+            'quantity': '4',
+            'reason': 'Damaged',
+        })
+        no_reason = self.post_form(f'/products/{product_id}/adjust-stock', {
+            'adjustment_type': 'add',
+            'quantity': '1',
+            'reason': '  ',
+        })
+        self.assertEqual(too_much.status_code, 302)
+        self.assertEqual(no_reason.status_code, 302)
+        with self.app.app_context():
+            self.assertEqual(self.db.session.get(application.Product, product_id).quantity, 3)
+            self.assertEqual(application.StockMovement.query.filter_by(product_id=product_id).count(), 0)
+
+    def test_stock_adjustment_is_business_scoped_and_rejects_cashier(self):
+        with self.app.app_context():
+            business_id = application.Business.query.first().id
+            other_business = application.Business(name='Other Shop')
+            self.db.session.add(other_business)
+            self.db.session.flush()
+            product = application.Product(
+                name='Other shop item',
+                sku='OTHER-001',
+                cost_price=1000,
+                selling_price=1500,
+                quantity=7,
+                low_stock_at=1,
+                business_id=other_business.id,
+            )
+            cashier = application.User(
+                username='stock-test-cashier',
+                password_hash=application.generate_password_hash('test-password-123'),
+                business_id=business_id,
+                email='cashier@example.test',
+                role='cashier',
+            )
+            self.db.session.add_all([product, cashier])
+            self.db.session.commit()
+            product_id = product.id
+
+        self.login()
+        isolated = self.post_form(f'/products/{product_id}/adjust-stock', {
+            'adjustment_type': 'remove',
+            'quantity': '1',
+            'reason': 'Correction',
+        })
+        self.assertEqual(isolated.status_code, 404)
+
+        cashier_client = self.app.test_client()
+        self.login_as(cashier_client, 'stock-test-cashier', 'test-password-123')
+        denied = self.post_form(f'/products/{product_id}/adjust-stock', {
+            'adjustment_type': 'remove',
+            'quantity': '1',
+            'reason': 'Correction',
+        }, client=cashier_client)
+        self.assertEqual(denied.status_code, 403)
+        with self.app.app_context():
+            self.assertEqual(self.db.session.get(application.Product, product_id).quantity, 7)
+            self.assertEqual(application.StockMovement.query.filter_by(product_id=product_id).count(), 0)
+
     def test_existing_sale_records_and_offline_sync_remain_available(self):
         with self.app.app_context():
             product = application.Product(

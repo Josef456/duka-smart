@@ -48,7 +48,7 @@
     </div>
     <div class="tablewrap">
         <table>
-            <thead><tr><th>Product</th><th>Code</th><th>Stock</th><th>Cost</th><th>Selling price</th><th>Status</th></tr></thead>
+            <thead><tr><th>Product</th><th>Code</th><th>Stock</th><th>Cost</th><th>Selling price</th><th>Status</th><th>Adjust stock</th></tr></thead>
             <tbody>
                 {% for p in products %}
                 <tr data-inventory-row data-product-name="{{ p.name|lower }}" data-product-sku="{{ p.sku|lower }}" data-stock-status="{{ 'low' if p.quantity <= p.low_stock_at else 'available' }}">
@@ -58,9 +58,24 @@
                     <td>{{ ugx(p.cost_price) }}</td>
                     <td>{{ ugx(p.selling_price) }}</td>
                     <td>{% if p.quantity <= p.low_stock_at %}<span class="pill low">Low stock</span>{% else %}<span class="pill good">In stock</span>{% endif %}</td>
+                    <td>
+                        <form method="post" action="{{ url_for('adjust_product_stock', product_id=p.id) }}" class="stock-adjust-form">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <label class="sr-only" for="adjustment-type-{{ p.id }}">Adjustment type for {{ p.name }}</label>
+                            <select id="adjustment-type-{{ p.id }}" name="adjustment_type" aria-label="Adjustment type for {{ p.name }}">
+                                <option value="add">Add</option>
+                                <option value="remove">Remove</option>
+                            </select>
+                            <label class="sr-only" for="adjustment-quantity-{{ p.id }}">Quantity for {{ p.name }}</label>
+                            <input id="adjustment-quantity-{{ p.id }}" name="quantity" type="number" min="1" max="2147483647" placeholder="Qty" aria-label="Quantity for {{ p.name }}" required>
+                            <label class="sr-only" for="adjustment-reason-{{ p.id }}">Reason for adjusting {{ p.name }}</label>
+                            <input id="adjustment-reason-{{ p.id }}" name="reason" maxlength="240" placeholder="Reason" aria-label="Reason for adjusting {{ p.name }}" required>
+                            <button class="btn secondary smallbtn" type="submit">Update</button>
+                        </form>
+                    </td>
                 </tr>
                 {% endfor %}
-                <tr id="inventory-no-results" hidden><td colspan="6">No products match your search and stock filter.</td></tr>
+                <tr id="inventory-no-results" hidden><td colspan="7">No products match your search and stock filter.</td></tr>
             </tbody>
         </table>
     </div>
@@ -68,4 +83,25 @@
     <div class="empty">No products yet. Add your first product above.</div>
     {% endif %}
 </section>
+{% if movements %}
+<section class="panel">
+    <div class="panelhead"><h2>Recent stock movements</h2><span class="muted tiny">Latest 30 entries</span></div>
+    <div class="tablewrap">
+        <table>
+            <thead><tr><th>Date</th><th>Product</th><th>Movement</th><th>Reason</th><th>Recorded by</th></tr></thead>
+            <tbody>
+                {% for movement in movements %}
+                <tr>
+                    <td>{{ movement.created_at.strftime('%d %b %Y %H:%M') }}</td>
+                    <td>{{ movement.product.name }}</td>
+                    <td><span class="pill {{ 'good' if movement.quantity_delta > 0 else 'low' }}">{{ '%+d'|format(movement.quantity_delta) }} units</span></td>
+                    <td>{{ movement.reason or movement.movement_type|replace('_', ' ')|title }}</td>
+                    <td>{{ movement.created_by.username if movement.created_by else 'System / legacy' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
 {% endblock %}

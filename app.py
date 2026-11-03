@@ -1010,7 +1010,59 @@ def products():
     return render_template(
         'products.html',
         products=Product.query.filter_by(business_id=g.business_id).order_by(Product.name.asc()).all(),
+        movements=StockMovement.query.filter_by(
+            business_id=g.business_id,
+        ).order_by(StockMovement.created_at.desc(), StockMovement.id.desc()).limit(30).all(),
     )
+
+@app.route('/products/<int:product_id>/adjust-stock', methods=['POST'])
+@roles_required('administrator', 'manager', 'stock_clerk')
+def adjust_product_stock(product_id):
+    product = db.session.query(Product).filter_by(
+        id=product_id,
+        business_id=g.business_id,
+    ).with_for_update().first()
+    if not product:
+        abort(404)
+
+    adjustment_type = request.form.get('adjustment_type', '')
+    reason = request.form.get('reason', '').strip()
+    try:
+        quantity = int(request.form.get('quantity', '0'))
+        if adjustment_type not in ('add', 'remove') or quantity <= 0 or quantity > 2_147_483_647:
+            raise ValueError()
+        delta = quantity if adjustment_type == 'add' else -quantity
+        if product.quantity + delta < 0 or product.quantity + delta > 2_147_483_647:
+            flash('That adjustment would make stock negative or exceed the supported limit.', 'error')
+            return redirect(url_for('products'))
+        if not reason or len(reason) > 240:
+            flash('Enter a reason for the stock adjustment (up to 240 characters).', 'error')
+            return redirect(url_for('products'))
+    except (ValueError, TypeError):
+        flash('Choose an adjustment type and enter a valid quantity.', 'error')
+        return redirect(url_for('products'))
+
+    product.quantity += delta
+    movement = StockMovement(
+        product_id=product.id,
+        business_id=g.business_id,
+        movement_type='adjustment',
+        quantity_delta=delta,
+        unit_cost=product.cost_price,
+        reason=reason,
+        created_by_id=g.current_user.id,
+    )
+    db.session.add(movement)
+    db.session.flush()
+    record_activity(
+        'stock_adjusted',
+        'product',
+        product.id,
+        f'Stock adjusted by {delta:+d} for {product.name}: {reason}',
+    )
+    db.session.commit()
+    flash(f'Stock updated. {product.name} now has {product.quantity} units.', 'success')
+    return redirect(url_for('products'))
 
 @app.route('/sales', methods=['GET', 'POST'])
 @roles_required('administrator', 'manager', 'cashier')
